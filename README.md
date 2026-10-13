@@ -26,7 +26,7 @@ Start-Process .\bin\LaptopCare.exe -ArgumentList '--ui-test' -Wait
 
 VS Code: **Terminal > Run Build Task**. The build uses the compiler supplied with Windows' .NET Framework. The resulting x64 executable is portable; no installer is required. It is unsigned.
 
-Tests write `self-test.txt` and `ui-test.txt` under the local data folder. They exercise command allowlisting, output interpretation, memory-pressure thresholds, live Windows readings, self-protection and all five UI tabs. They do not launch Windows repairs, close other apps, uninstall software or change startup entries.
+Tests write `self-test.txt` and `ui-test.txt` under the local data folder. They exercise command allowlisting, output interpretation, memory-pressure thresholds, live Windows readings, self-protection, startup disable/restore and collision handling in isolated temporary test registry keys, and all five UI tabs. They do not launch Windows repairs, close other apps, uninstall software or change actual startup entries. `--benchmark` measures four monitor samples and writes `benchmark.txt` locally.
 
 ## Scope and privacy
 

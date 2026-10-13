@@ -21,6 +21,11 @@ static class Program {
         Directory.CreateDirectory(Data);
         if (args.Length == 2 && args[0] == "--repair") { Repair.Run(args[1]); return; }
         if (args.Length == 1 && args[0] == "--self-test") { Tests.Run(); return; }
+        if (args.Length == 1 && args[0] == "--benchmark") {
+            var samples=new List<string>();var monitor=new Monitor();using(var own=Process.GetCurrentProcess()) {
+                for(int i=0;i<4;i++){own.Refresh();double before=own.TotalProcessorTime.TotalSeconds;var watch=Stopwatch.StartNew();monitor.Read();own.Refresh();samples.Add("Sample "+i+": elapsed "+watch.Elapsed.TotalSeconds.ToString("0.000")+" s; CPU "+(own.TotalProcessorTime.TotalSeconds-before).ToString("0.000")+" s "+monitor.Timing);}
+            }File.WriteAllLines(Path.Combine(Data,"benchmark.txt"),samples);return;
+        }
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         if (args.Length == 1 && args[0] == "--ui-test") { Tests.Ui(); return; }
         bool fresh; using (var mutex = new Mutex(true, "Local\\LaptopCare.UI", out fresh)) {
@@ -40,6 +45,14 @@ class Snapshot {
     public MemoryInfo Memory; public double Cpu; public List<AppRow> Apps; public DateTime At;
 }
 class Monitor {
+    public string Timing;
+    [DllImport("kernel32.dll")] static extern IntPtr OpenProcess(uint access,bool inherit,int pid);
+    [DllImport("kernel32.dll")] static extern bool GetProcessTimes(IntPtr handle,out long created,out long exited,out long kernel,out long user);
+    [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
+    static long Creation(int pid) {
+        IntPtr handle=OpenProcess(0x1000,false,pid);if(handle==IntPtr.Zero)return 0;
+        try {long created,exited,kernel,user;return GetProcessTimes(handle,out created,out exited,out kernel,out user)?DateTime.FromFileTimeUtc(created).Ticks:0;}finally{CloseHandle(handle);}
+    }
     delegate bool WindowVisitor(IntPtr h,IntPtr context);
     [DllImport("user32.dll")] static extern bool EnumWindows(WindowVisitor visitor,IntPtr context);
     [DllImport("user32.dll")] static extern bool IsWindowVisible(IntPtr h);
@@ -57,13 +70,16 @@ class Monitor {
             previousIdle=idle; previousTotal=total;
         }
         var rows=new List<AppRow>();
+        var watch=Stopwatch.StartNew();
         var windows=new Dictionary<int,string>();
         EnumWindows((h,context)=>{if(IsWindowVisible(h)){uint id;GetWindowThreadProcessId(h,out id);var text=new StringBuilder(256);GetWindowText(h,text,text.Capacity);if(text.Length>0 && !windows.ContainsKey((int)id))windows[(int)id]=text.ToString();}return true;},IntPtr.Zero);
-        foreach (var p in Process.GetProcesses()) using(p) { try {
+        double windowTime=watch.Elapsed.TotalSeconds;watch.Restart();var processes=Process.GetProcesses();double inventoryTime=watch.Elapsed.TotalSeconds;watch.Restart();
+        foreach (var p in processes) using(p) { try {
             string title;windows.TryGetValue(p.Id,out title);
-            rows.Add(new AppRow { Pid=p.Id, Name=p.ProcessName, Title=title ?? "", Bytes=p.WorkingSet64,
-                Started=p.StartTime.ToUniversalTime().Ticks, Closable=false });
+            string name=p.ProcessName;long bytes=p.WorkingSet64;long started=Creation(p.Id);
+            rows.Add(new AppRow { Pid=p.Id, Name=name, Title=title ?? "", Bytes=bytes,Started=started, Closable=false });
         } catch (System.ComponentModel.Win32Exception) {} catch (InvalidOperationException) {} }
+        Timing="windows="+windowTime.ToString("0.000")+" inventory="+inventoryTime.ToString("0.000")+" properties="+watch.Elapsed.TotalSeconds.ToString("0.000");
         return new Snapshot { Memory=m, Cpu=cpu, Apps=rows.OrderByDescending(x=>x.Bytes).ToList(), At=DateTime.Now };
     }
     public static bool SafeToClose(Process p) {
@@ -102,6 +118,7 @@ static class Repair {
         var text=new StringBuilder(); object gate=new object();
         using(var p=new Process()) {
             p.StartInfo=new ProcessStartInfo(Path.Combine(Environment.SystemDirectory,file),args) { UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true };
+            if(file=="sfc.exe") {p.StartInfo.StandardOutputEncoding=Encoding.Unicode;p.StartInfo.StandardErrorEncoding=Encoding.Unicode;}
             DataReceivedEventHandler collect=(sender,e)=> { if(e.Data!=null)lock(gate) { text.AppendLine(e.Data); File.AppendAllText(Log,e.Data+Environment.NewLine); } };
             p.OutputDataReceived+=collect; p.ErrorDataReceived+=collect;
             File.AppendAllText(Log,"\r\n"+file+" "+args+"\r\n"); p.Start(); p.BeginOutputReadLine(); p.BeginErrorReadLine(); p.WaitForExit();
@@ -149,11 +166,14 @@ static class Startup {
     public static void Toggle(StartupRow row) {
         using(var active=Registry.CurrentUser.CreateSubKey(RunKey)) using(var backup=Registry.CurrentUser.CreateSubKey(Backup)) {
             var source=row.Enabled?active:backup; var dest=row.Enabled?backup:active;
-            if((source.GetValue(row.Name,null,RegistryValueOptions.DoNotExpandEnvironmentNames) as string)!=row.Command)throw new Exception("This startup entry changed. Reload before trying again.");
-            if(dest.GetValue(row.Name)!=null)throw new Exception("An entry with this name already exists in the destination. No change made.");
-            dest.SetValue(row.Name,row.Command,source.GetValueKind(row.Name)); source.DeleteValue(row.Name);
+            Move(source,dest,row);
             Program.Audit((row.Enabled?"Disabled":"Restored")+" startup: "+row.Name);
         }
+    }
+    public static void Move(RegistryKey source,RegistryKey dest,StartupRow row) {
+        if((source.GetValue(row.Name,null,RegistryValueOptions.DoNotExpandEnvironmentNames) as string)!=row.Command)throw new Exception("This startup entry changed. Reload before trying again.");
+        if(dest.GetValue(row.Name)!=null)throw new Exception("An entry with this name already exists in the destination. No change made.");
+        dest.SetValue(row.Name,row.Command,source.GetValueKind(row.Name)); source.DeleteValue(row.Name);
     }
 }
 class Trend : Control {
@@ -235,7 +255,7 @@ class MainWindow : Form {
                 apps.Rows.Clear(); foreach(var a in snap.Apps.Take(80)) { int i=apps.Rows.Add(a.Name,a.Pid,(a.Bytes/1048576.0).ToString("0.0"),(growth[a.Pid]/1048576.0).ToString("+0.0;-0.0;0.0"),a.Title); apps.Rows[i].Tag=a;if(a.Pid==selected)apps.Rows[i].Selected=true; }
             }
             var top=snap.Apps.FirstOrDefault(); var drive=new DriveInfo(Path.GetPathRoot(Environment.SystemDirectory));
-            advice.Text=Monitor.Size(snap.Memory.Available)+" available of "+Monitor.Size(snap.Memory.Total)+" physical RAM.\r\n"+(pressure.Text=="NORMAL"?"Memory headroom looks comfortable.":"Memory is tight. Review large apps and close only work you have saved.")+"\r\n"+(top==null?"": "Largest visible process: "+top.Name+" ("+(top.Bytes/1048576.0).ToString("0")+" MB). ")+"System drive: "+Monitor.Size((ulong)drive.AvailableFreeSpace)+" free.";
+            advice.Text=Monitor.Size(snap.Memory.Available)+" available of "+Monitor.Size(snap.Memory.Total)+" physical RAM.\r\n"+(pressure.Text=="NORMAL"?"Memory headroom looks comfortable.":"Memory is tight. Review large apps and close only work you have saved.")+"\r\n"+(top==null?"": "Largest process: "+top.Name+" ("+(top.Bytes/1048576.0).ToString("0")+" MB). ")+"System drive: "+Monitor.Size((ulong)drive.AvailableFreeSpace)+" free.";
             footer.Text="Updated "+snap.At.ToString("T")+" · every "+(timer.Interval/1000)+" seconds · local only · commit used "+Monitor.Size(snap.Memory.CommitLimit-snap.Memory.CommitAvailable)+" / "+Monitor.Size(snap.Memory.CommitLimit);
             tray.Text="LaptopCare · RAM "+snap.Memory.Load+"% · "+pressure.Text;
             RefreshRepair();
@@ -288,6 +308,13 @@ static class Tests {
         check(Repair.Conclusion("Windows Resource Protection did not find any integrity violations.",0).Contains("no integrity"),"Clean SFC conclusion parsed");
         check(Repair.Conclusion("Windows Resource Protection found corrupt files and successfully repaired them.",0).Contains("damaged files repaired"),"Repaired SFC conclusion parsed");
         check(Repair.Conclusion("unknown or localized output",0).Contains("no clean-health conclusion"),"Unknown output cannot become clean result");
+        string testKey="Software\\LaptopCare\\Tests\\"+Guid.NewGuid().ToString("N");
+        try { using(var source=Registry.CurrentUser.CreateSubKey(testKey+"\\Source"))using(var dest=Registry.CurrentUser.CreateSubKey(testKey+"\\Backup")) {
+            var row=new StartupRow{Name="Example",Command="%LOCALAPPDATA%\\example.exe"};source.SetValue(row.Name,row.Command,RegistryValueKind.ExpandString);
+            Startup.Move(source,dest,row);check(source.GetValue(row.Name)==null && dest.GetValueKind(row.Name)==RegistryValueKind.ExpandString,"Startup disable preserves registry type");
+            Startup.Move(dest,source,row);check((source.GetValue(row.Name,null,RegistryValueOptions.DoNotExpandEnvironmentNames) as string)==row.Command,"Startup restore preserves original command");
+            dest.SetValue(row.Name,"conflict");bool rejected=false;try{Startup.Move(source,dest,row);}catch{rejected=true;}check(rejected && source.GetValue(row.Name)!=null,"Startup collision leaves original intact");
+        }}finally{Registry.CurrentUser.DeleteSubKeyTree(testKey,false);}
         var m=new MemoryInfo{Load=95,Available=2UL*1024*1024*1024};check(Monitor.Pressure(m)=="HIGH","High load classified");m.Load=50;m.Available=400UL*1024*1024;check(Monitor.Pressure(m)=="HIGH","Low available RAM classified");
         var live=new Monitor().Read();check(live.Memory.Total>0 && live.Memory.Available<=live.Memory.Total,"Live Windows memory values valid");check(live.Apps.Count>0,"Live process inventory populated");using(var own=Process.GetCurrentProcess())check(!Monitor.SafeToClose(own),"Monitor protects itself");
         results.Add("Observed "+live.Apps.Count+" readable processes; RAM "+live.Memory.Load+"%");
