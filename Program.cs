@@ -16,6 +16,20 @@ using Microsoft.Win32;
 
 namespace LaptopCare {
 static class Program {
+    delegate bool WindowVisitor(IntPtr h,IntPtr context);
+    [DllImport("user32.dll")] static extern bool EnumWindows(WindowVisitor visitor,IntPtr context);
+    [DllImport("user32.dll",CharSet=CharSet.Unicode)] static extern int GetWindowText(IntPtr h,StringBuilder text,int length);
+    [DllImport("user32.dll")] static extern uint GetWindowThreadProcessId(IntPtr h,out uint pid);
+    [DllImport("user32.dll")] static extern bool ShowWindow(IntPtr h,int command);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern bool PostMessage(IntPtr h,int message,IntPtr wParam,IntPtr lParam);
+    internal static void ShowExisting() {
+        EnumWindows((h,context)=>{var title=new StringBuilder(256);GetWindowText(h,title,title.Capacity);
+            if(title.ToString()=="LaptopCare • Health & repair") {
+                uint pid;GetWindowThreadProcessId(h,out pid);
+                try{using(var p=Process.GetProcessById((int)pid))if(p.ProcessName.StartsWith("LaptopCare",StringComparison.OrdinalIgnoreCase) && p.SessionId==Process.GetCurrentProcess().SessionId){PostMessage(h,0x802A,IntPtr.Zero,IntPtr.Zero);SetForegroundWindow(h);return false;}}catch(ArgumentException){}
+            }return true;},IntPtr.Zero);
+    }
     public static readonly string Data = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "LaptopCare");
     [STAThread] static void Main(string[] args) {
         Directory.CreateDirectory(Data);
@@ -29,7 +43,7 @@ static class Program {
         Application.EnableVisualStyles(); Application.SetCompatibleTextRenderingDefault(false);
         if (args.Length == 1 && args[0] == "--ui-test") { Tests.Ui(); return; }
         bool fresh; using (var mutex = new Mutex(true, "Local\\LaptopCare.UI", out fresh)) {
-            if (!fresh) { MessageBox.Show("LaptopCare is already running. Open it from the system tray."); return; }
+            if (!fresh) { ShowExisting(); return; }
             Application.Run(new MainWindow());
         }
     }
@@ -188,13 +202,14 @@ class Trend : Control {
     }
 }
 class MainWindow : Form {
+    protected override void WndProc(ref Message message) {if(message.Msg==0x802A){ShowDashboard();return;}base.WndProc(ref message);}
     Color bg=Color.FromArgb(15,23,35), panel=Color.FromArgb(25,36,51), ink=Color.FromArgb(230,237,246), accent=Color.FromArgb(68,210,178);
     Label memory, cpu, pressure, advice, footer; Trend graph; DataGridView apps, startup; TextBox repairText;
     NotifyIcon tray; System.Windows.Forms.Timer timer; Monitor monitor=new Monitor(); bool sampling, exiting; Snapshot latest;
     Dictionary<int,AppRow> previous=new Dictionary<int,AppRow>(); Dictionary<int,long> growth=new Dictionary<int,long>(); DateTime baseline=DateTime.Now;
     public MainWindow() {
         Text="LaptopCare • Health & repair"; Size=new Size(1100,800); MinimumSize=new Size(880,680); StartPosition=FormStartPosition.CenterScreen;
-        BackColor=bg; ForeColor=ink; Font=new Font("Segoe UI",10); Icon=SystemIcons.Shield;
+        BackColor=bg; ForeColor=ink; Font=new Font("Segoe UI",10); Icon=Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Shield;
         var header=new Panel { Dock=DockStyle.Top,Height=92,Padding=new Padding(24,16,24,10),BackColor=panel };
         header.Controls.Add(new Label{Text="LAPTOPCARE",Font=new Font("Segoe UI",23,FontStyle.Bold),AutoSize=true,Location=new Point(24,10)});
         header.Controls.Add(new Label{Text="Know what is slowing you down. Fix what needs attention.",AutoSize=true,Location=new Point(27,57),ForeColor=Color.LightSteelBlue});
@@ -298,6 +313,9 @@ static class Tests {
                     report.Add("PASS visible grid with "+grid.Columns.Count+" columns");
                 }
             }
+            window.Hide();Program.ShowExisting();Application.DoEvents();
+            if(!window.Visible)throw new Exception("Existing hidden window did not reopen");
+            report.Add("PASS hidden window reopens through shortcut message");
             File.WriteAllLines(Path.Combine(Program.Data,"ui-test.txt"),report);
             window.Dispose();
         }

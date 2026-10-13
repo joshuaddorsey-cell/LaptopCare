@@ -4,7 +4,9 @@ A lightweight, local Windows desktop dashboard for memory pressure and Windows m
 
 ## Use
 
-Run `bin/LaptopCare.exe` after building, or use the LaptopCare desktop shortcut created on this computer. Minimize or close the window to monitor in the system tray. Double-click its tray icon to reopen; choose **Exit** from its tray menu to stop. Monitoring is every five seconds while visible and every fifteen seconds in the tray. It does not start automatically with Windows.
+Run `bin/LaptopCare.exe` after building, or use the LaptopCare desktop shortcut created on this computer. Minimize or close the window to monitor in the system tray. Double-click the desktop shortcut or its little computer tray icon to reopen; choose **Exit** from its tray menu to stop. Monitoring is every five seconds while visible and every fifteen seconds in the tray. It does not start automatically with Windows.
+
+Version 0.1.1 adds the computer icon and reopening an existing hidden window through the shortcut. On this computer its updated shortcut targets `bin/LaptopCare-v0.1.1.exe` while an earlier repair worker continues independently. The portable executable is also available as `LaptopCare.exe` in the parent outputs folder.
 
 - **Overview:** physical RAM use, available memory, CPU activity, commit usage, recent RAM samples and system-drive free space. Memory pressure thresholds are advisory: high at 90% use or less than 512 MiB available; elevated at 80% use or less than 1 GiB available. These do not measure actual paging or establish the cause of a slowdown.
 - **Memory & apps:** up to 80 largest readable processes, resident working set and growth since a rolling baseline of at most ten minutes. Working sets include shared pages; do not sum them as physical RAM usage. Selected windowed apps can receive a graceful close request after confirmation. No force-kill button; the app, Windows components, editors, Codex/ChatGPT and maintenance processes are protected. Browsers may prompt to save work.
