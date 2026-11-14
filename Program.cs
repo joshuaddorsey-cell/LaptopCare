@@ -211,7 +211,7 @@ class Trend : Control {
 class MainWindow : Form {
     protected override void WndProc(ref Message message) {if(message.Msg==0x802A){ShowDashboard();return;}base.WndProc(ref message);}
     Color bg=Color.FromArgb(15,23,35), panel=Color.FromArgb(25,36,51), ink=Color.FromArgb(230,237,246), accent=Color.FromArgb(68,210,178);
-    Label memory, cpu, pressure, advice, footer; Trend graph; DataGridView apps, startup; TextBox repairText; Label repairStatus;
+    Label memory, cpu, pressure, advice, footer; Trend graph; DataGridView apps, startup; TextBox repairText; Label repairStatus, closeStatus;
     NotifyIcon tray; System.Windows.Forms.Timer timer; Monitor monitor=new Monitor(); bool sampling, exiting; Snapshot latest;
     Dictionary<int,AppRow> previous=new Dictionary<int,AppRow>(); Dictionary<int,long> growth=new Dictionary<int,long>(); DateTime baseline=DateTime.Now;
     public MainWindow() {
@@ -241,8 +241,23 @@ class MainWindow : Form {
             if (!device.IsDisposed) device.Text = details;
         };
         apps=Grid(new[]{"App","PID","RAM (MB)","Change (MB)","Window"}); process.Controls.Add(apps);
-        var appActions=Actions(process,"RAM is resident working set, not private memory. Shared pages can appear in multiple apps. Change is since the baseline (up to 10 minutes).");
-        appActions.Controls.Add(Button("Ask selected app to close",CloseSelected)); appActions.Controls.Add(Button("Reset baseline",()=>{previous.Clear();growth.Clear();baseline=DateTime.Now;})); appActions.Controls.Add(Button("Open Task Manager",()=>Program.Open("taskmgr.exe")));
+        apps.Columns[0].FillWeight = 95;
+        apps.Columns[1].FillWeight = 45;
+        apps.Columns[2].FillWeight = 65;
+        apps.Columns[3].FillWeight = 75;
+        apps.Columns[4].FillWeight = 190;
+        apps.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(29, 42, 59);
+        apps.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
+        apps.GridColor = Color.FromArgb(40, 53, 70);
+        closeStatus = new Label {
+            Dock = DockStyle.Bottom, Height = 48, Padding = new Padding(12, 8, 12, 0),
+            BackColor = panel, ForeColor = Color.LightSteelBlue,
+            Text = "Select an app with a window to request that it close."
+        };
+        process.Controls.Add(closeStatus);
+        var appActions = Actions(process, "Memory shows each process’s working set, which can include shared RAM. Change is measured from the baseline.");
+        appActions.Height = 104;
+        appActions.Controls.Add(Button("Close selected app",CloseSelected)); appActions.Controls.Add(Button("Reset baseline",()=>{previous.Clear();growth.Clear();baseline=DateTime.Now;})); appActions.Controls.Add(Button("Open Task Manager",()=>Program.Open("taskmgr.exe")));
         startup=Grid(new[]{"Name","Status","Command"}); start.Controls.Add(startup);
         var startupActions=Actions(start,"Current-user Run entries only. Disabling prevents launch at next sign-in; it does not close the app. Other startup types remain in Windows Settings.");
         startupActions.Controls.Add(Button("Disable / restore selected",ToggleStartup)); startupActions.Controls.Add(Button("Reload",LoadStartup)); startupActions.Controls.Add(Button("All startup apps",()=>Program.Open("ms-settings:startupapps"))); LoadStartup();
@@ -311,8 +326,21 @@ class MainWindow : Form {
             if((DateTime.Now-baseline).TotalMinutes>=10){previous.Clear();growth.Clear();baseline=DateTime.Now;}
             foreach(var a in snap.Apps) { AppRow old; if(!previous.TryGetValue(a.Pid,out old)||old.Started!=a.Started)previous[a.Pid]=a;growth[a.Pid]=a.Bytes-previous[a.Pid].Bytes; }
             if(Visible && apps.Visible) {
-                int selected=apps.SelectedRows.Count>0 && apps.SelectedRows[0].Tag!=null?((AppRow)apps.SelectedRows[0].Tag).Pid:-1;
-                apps.Rows.Clear(); foreach(var a in snap.Apps.Take(80)) { int i=apps.Rows.Add(a.Name,a.Pid,(a.Bytes/1048576.0).ToString("0.0"),(growth[a.Pid]/1048576.0).ToString("+0.0;-0.0;0.0"),a.Title); apps.Rows[i].Tag=a;if(a.Pid==selected)apps.Rows[i].Selected=true; }
+                var selected = apps.SelectedRows.Count == 0 ? null : apps.SelectedRows[0].Tag as AppRow;
+                int firstVisible = apps.FirstDisplayedScrollingRowIndex;
+                apps.Rows.Clear();
+                DataGridViewRow matchingRow = null;
+                foreach (var app in snap.Apps.Take(80)) {
+                    int index = apps.Rows.Add(app.Name, app.Pid, (app.Bytes / 1048576.0).ToString("0.0"),
+                        (growth[app.Pid] / 1048576.0).ToString("+0.0;-0.0;0.0"), app.Title);
+                    var row = apps.Rows[index];
+                    row.Tag = app;
+                    if (selected != null && app.Pid == selected.Pid && app.Started == selected.Started)
+                        matchingRow = row;
+                }
+                apps.CurrentCell = matchingRow == null ? null : matchingRow.Cells[0];
+                if (firstVisible >= 0 && apps.Rows.Count > 0)
+                    apps.FirstDisplayedScrollingRowIndex = Math.Min(firstVisible, apps.Rows.Count - 1);
             }
             var top=snap.Apps.FirstOrDefault(); var drive=new DriveInfo(Path.GetPathRoot(Environment.SystemDirectory));
             advice.Text=Monitor.Size(snap.Memory.Available)+" available of "+Monitor.Size(snap.Memory.Total)+" physical RAM.\r\n"+(pressure.Text=="NORMAL"?"Memory headroom looks comfortable.":"Memory is tight. Review large apps and close only work you have saved.")+"\r\n"+(top==null?"": "Largest process: "+top.Name+" ("+(top.Bytes/1048576.0).ToString("0")+" MB). ")+"System drive: "+Monitor.Size((ulong)drive.AvailableFreeSpace)+" free.";
@@ -321,12 +349,36 @@ class MainWindow : Form {
             RefreshRepair();
         } catch(Exception e){footer.Text="Monitor: "+e.Message;} finally{sampling=false;}
     }
-    void CloseSelected() {
-        if(apps.SelectedRows.Count==0)return;var a=apps.SelectedRows[0].Tag as AppRow;if(a==null)return;
-        using(var p=Process.GetProcessById(a.Pid)) {
-            if(p.StartTime.ToUniversalTime().Ticks!=a.Started || !Monitor.SafeToClose(p)) {MessageBox.Show(this,"This app is protected, has no normal window, or changed since the sample. Close it manually if appropriate.");return;}
-            if(MessageBox.Show(this,"Ask "+a.Name+" to close? Save your work first. It may display its own save prompt. LaptopCare will not force it to end.","Close app",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
-            bool sent=p.CloseMainWindow();Program.Audit("Close request to "+a.Name+" PID "+a.Pid+": "+sent);MessageBox.Show(this,sent?"Close request sent. The app may need your attention before exiting.":"The app did not accept a close request.");
+    async void CloseSelected() {
+        var app = apps.SelectedRows.Count == 0 ? null : apps.SelectedRows[0].Tag as AppRow;
+        if (app == null) {
+            closeStatus.Text = "Select an app first.";
+            return;
+        }
+        if (MessageBox.Show(this, "Ask " + app.Name + " to close? Save your work first.",
+            "Close app", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+
+        try {
+            using (var process = Process.GetProcessById(app.Pid)) {
+                if (app.Started == 0 || process.StartTime.ToUniversalTime().Ticks != app.Started || !Monitor.SafeToClose(process)) {
+                    closeStatus.Text = app.Name + " is protected, has no closable window, or has restarted.";
+                    return;
+                }
+                bool sent = process.CloseMainWindow();
+                closeStatus.Text = sent ? "Waiting for " + app.Name + " to close…" :
+                    app.Name + " did not accept the close request. Check for an open dialog.";
+                Program.Audit("Close request to " + app.Name + " PID " + app.Pid + ": " + sent);
+                if (!sent) return;
+                bool exited = await Task.Run(() => process.WaitForExit(3500));
+                if (!IsDisposed) closeStatus.Text = exited ? app.Name + " closed." :
+                    app.Name + " is still running. Check for a save prompt or a tray icon.";
+            }
+        } catch (ArgumentException) {
+            closeStatus.Text = app.Name + " is no longer running.";
+        } catch (InvalidOperationException) {
+            closeStatus.Text = app.Name + " is no longer available.";
+        } catch (System.ComponentModel.Win32Exception error) {
+            closeStatus.Text = "Windows could not close " + app.Name + ". " + error.Message;
         }
     }
     void LoadStartup(){startup.Rows.Clear();foreach(var r in Startup.Read()){int i=startup.Rows.Add(r.Name,r.Enabled ? "Enabled" : r.DisabledByWindows ? "Disabled in Windows" : "Disabled by LaptopCare",r.Command);startup.Rows[i].Tag=r;}}
