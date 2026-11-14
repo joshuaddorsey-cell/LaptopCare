@@ -166,14 +166,21 @@ static class Repair {
         }
     }
 }
-class StartupRow { public string Name, Command; public bool Enabled; }
+class StartupRow { public string Name, Command; public bool Enabled, DisabledByWindows; }
 static class Startup {
     const string RunKey="Software\\Microsoft\\Windows\\CurrentVersion\\Run";
     const string Backup="Software\\LaptopCare\\DisabledStartup";
     public static List<StartupRow> Read() {
         var rows=new List<StartupRow>();
         foreach(var pair in new[]{new{Path=RunKey,Enabled=true},new{Path=Backup,Enabled=false}}) using(var key=Registry.CurrentUser.OpenSubKey(pair.Path)) {
-            if(key!=null)foreach(string n in key.GetValueNames()) { var v=key.GetValue(n,null,RegistryValueOptions.DoNotExpandEnvironmentNames) as string; if(v!=null)rows.Add(new StartupRow{Name=n,Command=v,Enabled=pair.Enabled}); }
+            if(key!=null)foreach(string n in key.GetValueNames()) { var v=key.GetValue(n,null,RegistryValueOptions.DoNotExpandEnvironmentNames) as string; if(v!=null) {
+            var state = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\CurrentVersion\Explorer\StartupApproved\Run");
+            using (state) {
+                var approval = state == null ? null : state.GetValue(n) as byte[];
+                bool disabled = pair.Enabled && approval != null && approval.Length >= 12 && (approval[0] == 3 || approval[0] == 7);
+                rows.Add(new StartupRow { Name = n, Command = v, Enabled = pair.Enabled && !disabled, DisabledByWindows = disabled });
+            }
+        } }
         }
         return rows.OrderBy(x=>x.Name).ToList();
     }
@@ -204,7 +211,7 @@ class Trend : Control {
 class MainWindow : Form {
     protected override void WndProc(ref Message message) {if(message.Msg==0x802A){ShowDashboard();return;}base.WndProc(ref message);}
     Color bg=Color.FromArgb(15,23,35), panel=Color.FromArgb(25,36,51), ink=Color.FromArgb(230,237,246), accent=Color.FromArgb(68,210,178);
-    Label memory, cpu, pressure, advice, footer; Trend graph; DataGridView apps, startup; TextBox repairText;
+    Label memory, cpu, pressure, advice, footer; Trend graph; DataGridView apps, startup; TextBox repairText; Label repairStatus;
     NotifyIcon tray; System.Windows.Forms.Timer timer; Monitor monitor=new Monitor(); bool sampling, exiting; Snapshot latest;
     Dictionary<int,AppRow> previous=new Dictionary<int,AppRow>(); Dictionary<int,long> growth=new Dictionary<int,long>(); DateTime baseline=DateTime.Now;
     public MainWindow() {
@@ -232,7 +239,10 @@ class MainWindow : Form {
         startup=Grid(new[]{"Name","Status","Command"}); start.Controls.Add(startup);
         var startupActions=Actions(start,"Current-user Run entries only. Disabling prevents launch at next sign-in; it does not close the app. Other startup types remain in Windows Settings.");
         startupActions.Controls.Add(Button("Disable / restore selected",ToggleStartup)); startupActions.Controls.Add(Button("Reload",LoadStartup)); startupActions.Controls.Add(Button("All startup apps",()=>Program.Open("ms-settings:startupapps"))); LoadStartup();
+        tabs.SelectedIndexChanged += (sender, args) => { if (tabs.SelectedTab == start) LoadStartup(); };
         repairText=new TextBox{Dock=DockStyle.Fill,Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,BackColor=panel,ForeColor=ink,Font=new Font("Consolas",10),WordWrap=false}; repairs.Controls.Add(repairText);
+        repairStatus = new Label { Dock = DockStyle.Top, Height = 105, Padding = new Padding(8), ForeColor = ink };
+        repairs.Controls.Add(repairStatus);
         var repairActions=Actions(repairs,"Windows will request administrator permission. Keep the laptop powered and online. Closing this dashboard does not stop an active repair.");
         repairActions.Controls.Add(Button("Check system files",()=>StartRepair("scan"))); repairActions.Controls.Add(Button("Repair Windows",()=>StartRepair("repair"))); repairActions.Controls.Add(Button("Scan system drive",()=>StartRepair("disk"))); repairActions.Controls.Add(Button("Open repair log",()=>{if(File.Exists(Repair.Log))Program.Open(Repair.Log);}));
         var toolLayout=new FlowLayoutPanel{Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,Padding=new Padding(20),WrapContents=false}; tools.Controls.Add(toolLayout);
@@ -284,8 +294,8 @@ class MainWindow : Form {
             bool sent=p.CloseMainWindow();Program.Audit("Close request to "+a.Name+" PID "+a.Pid+": "+sent);MessageBox.Show(this,sent?"Close request sent. The app may need your attention before exiting.":"The app did not accept a close request.");
         }
     }
-    void LoadStartup(){startup.Rows.Clear();foreach(var r in Startup.Read()){int i=startup.Rows.Add(r.Name,r.Enabled?"Enabled":"Disabled by LaptopCare",r.Command);startup.Rows[i].Tag=r;}}
-    void ToggleStartup(){if(startup.SelectedRows.Count==0)return;var row=startup.SelectedRows[0].Tag as StartupRow;if(row==null)return;if(MessageBox.Show(this,(row.Enabled?"Disable ":"Restore ")+row.Name+" at next sign-in?", "Startup change",MessageBoxButtons.YesNo)!=DialogResult.Yes)return;Startup.Toggle(row);LoadStartup();}
+    void LoadStartup(){startup.Rows.Clear();foreach(var r in Startup.Read()){int i=startup.Rows.Add(r.Name,r.Enabled ? "Enabled" : r.DisabledByWindows ? "Disabled in Windows" : "Disabled by LaptopCare",r.Command);startup.Rows[i].Tag=r;}}
+    void ToggleStartup(){if(startup.SelectedRows.Count==0)return;var row=startup.SelectedRows[0].Tag as StartupRow;if(row==null)return;if(row.DisabledByWindows){Program.Open("ms-settings:startupapps");return;}if(MessageBox.Show(this,(row.Enabled?"Disable ":"Restore ")+row.Name+" at next sign-in?", "Startup change",MessageBoxButtons.YesNo)!=DialogResult.Yes)return;Startup.Toggle(row);LoadStartup();}
     void StartRepair(string mode) {
         if(Repair.Busy() || Repair.WorkerActive()){MessageBox.Show(this,"An existing Windows scan or repair is running. No duplicate will be launched.");return;}
         var current=Repair.Read();if(current!=null && current.Status=="Running"){
@@ -296,7 +306,47 @@ class MainWindow : Form {
         if(MessageBox.Show(this,description+"\r\n\r\nContinue? Windows will ask for administrator permission.","Windows maintenance",MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
         Process.Start(new ProcessStartInfo(Application.ExecutablePath,"--repair "+mode){UseShellExecute=true,Verb="runas",WindowStyle=ProcessWindowStyle.Hidden});Program.Audit("Requested "+mode);RefreshRepair();
     }
-    void RefreshRepair(){var r=Repair.Read();string status=r==null?"No repair has been run by LaptopCare.":r.Status+" · "+r.Mode+"\r\nStarted: "+r.Started+"\r\nFinished: "+r.Finished+"\r\n"+r.Detail;string tail="";try{if(File.Exists(Repair.Log)) {using(var f=new FileStream(Repair.Log,FileMode.Open,FileAccess.Read,FileShare.ReadWrite)){if(f.Length>32000)f.Seek(-32000,SeekOrigin.End);using(var reader=new StreamReader(f))tail=reader.ReadToEnd();}}}catch(IOException){}string text=status+"\r\n\r\n"+tail;if(repairText.Text!=text)repairText.Text=text;}
+    void RefreshRepair() {
+        var result = Repair.Read();
+        var preview = new Queue<string>();
+        string progress = null;
+        bool currentStage = false;
+        string tool = result == null ? "" : result.Mode == "disk" ? "chkdsk.exe" :
+            (result.Detail ?? "").Contains("(SFC)") ? "sfc.exe" : (result.Detail ?? "").Contains("(DISM)") ? "dism.exe" : "";
+        try {
+            if (File.Exists(Repair.Log)) {
+                using (var file = new FileStream(Repair.Log, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (var reader = new StreamReader(file)) {
+                    string line;
+                    while ((line = reader.ReadLine()) != null) {
+                        if (preview.Count == 200) preview.Dequeue();
+                        preview.Enqueue(line);
+                        if (result == null || result.Status != "Running") continue;
+                        if (System.Text.RegularExpressions.Regex.IsMatch(line, @"^(dism|sfc|chkdsk)\.exe\s", System.Text.RegularExpressions.RegexOptions.IgnoreCase)) {
+                            currentStage = line.StartsWith(tool + " ", StringComparison.OrdinalIgnoreCase);
+                            progress = null;
+                        }
+                        if (!currentStage) continue;
+                        string pattern = tool == "chkdsk.exe" ? @"\bTotal:\s*(\d{1,3}\s*%)" : @"(\d{1,3}(?:[.,]\d+)?\s*%)";
+                        var match = System.Text.RegularExpressions.Regex.Match(line, pattern);
+                        if (match.Success) progress = match.Groups[1].Value;
+                    }
+                }
+            }
+        } catch (IOException) {}
+        string status = result == null ? "No Windows maintenance recorded." :
+            result.Status + " · " + result.Mode + "\r\n" + result.Detail +
+            "\r\nStarted: " + result.Started + (string.IsNullOrEmpty(result.Finished) ? "" : "  ·  Finished: " + result.Finished);
+        if (result != null && result.Status == "Running")
+            status += "\r\n" + (progress == null ? "Waiting for Windows to report progress" : tool + " · " + progress + " complete");
+        if (repairStatus.Text != status) repairStatus.Text = status;
+        string tail = string.Join(Environment.NewLine, preview);
+        if (repairText.Text != tail) {
+            int selection = repairText.SelectionStart;
+            repairText.Text = tail;
+            repairText.Select(Math.Min(selection, repairText.TextLength), 0);
+        }
+    }
     void Export(){if(latest==null)return;using(var d=new SaveFileDialog{Filter="Text report|*.txt",FileName="LaptopCare-"+DateTime.Now.ToString("yyyyMMdd-HHmm")+".txt"}){if(d.ShowDialog(this)!=DialogResult.OK)return;var s=new StringBuilder();s.AppendLine("LaptopCare live health report "+latest.At.ToString("s"));s.AppendLine("RAM load: "+latest.Memory.Load+"%; available: "+Monitor.Size(latest.Memory.Available));s.AppendLine("CPU: "+latest.Cpu.ToString("0.0")+"%; pressure: "+Monitor.Pressure(latest.Memory));s.AppendLine("Process working sets (shared memory may be counted more than once):");foreach(var a in latest.Apps.Take(30))s.AppendLine(a.Name+" PID "+a.Pid+" "+(a.Bytes/1048576.0).ToString("0.0")+" MB");var r=Repair.Read();if(r!=null)s.AppendLine("Latest maintenance: "+r.Status+" "+r.Detail);File.WriteAllText(d.FileName,s.ToString());Program.Audit("Exported health report");Program.Open(d.FileName);}}
 }
 static class Tests {
