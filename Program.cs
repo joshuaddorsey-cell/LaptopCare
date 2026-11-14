@@ -211,7 +211,7 @@ class Trend : Control {
 class MainWindow : Form {
     protected override void WndProc(ref Message message) {if(message.Msg==0x802A){ShowDashboard();return;}base.WndProc(ref message);}
     Color bg=Color.FromArgb(15,23,35), panel=Color.FromArgb(25,36,51), ink=Color.FromArgb(230,237,246), accent=Color.FromArgb(68,210,178);
-    Label memory, cpu, pressure, advice, footer; Trend graph; DataGridView apps, startup; TextBox repairText; Label repairStatus, closeStatus;
+    Label memory, cpu, pressure, advice, footer; Trend graph; DataGridView apps, startup; TextBox repairText; Label repairStatus, closeStatus, selectedApp; Button closeApp; ComboBox appFilter; bool refreshingApps;
     NotifyIcon tray; System.Windows.Forms.Timer timer; Monitor monitor=new Monitor(); bool sampling, exiting; Snapshot latest;
     Dictionary<int,AppRow> previous=new Dictionary<int,AppRow>(); Dictionary<int,long> growth=new Dictionary<int,long>(); DateTime baseline=DateTime.Now;
     public MainWindow() {
@@ -249,15 +249,30 @@ class MainWindow : Form {
         apps.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(29, 42, 59);
         apps.CellBorderStyle = DataGridViewCellBorderStyle.SingleHorizontal;
         apps.GridColor = Color.FromArgb(40, 53, 70);
-        closeStatus = new Label {
-            Dock = DockStyle.Bottom, Height = 48, Padding = new Padding(12, 8, 12, 0),
-            BackColor = panel, ForeColor = Color.LightSteelBlue,
-            Text = "Select an app with a window to request that it close."
-        };
-        process.Controls.Add(closeStatus);
-        var appActions = Actions(process, "Memory shows each process’s working set, which can include shared RAM. Change is measured from the baseline.");
-        appActions.Height = 104;
-        appActions.Controls.Add(Button("Close selected app",CloseSelected)); appActions.Controls.Add(Button("Reset baseline",()=>{previous.Clear();growth.Clear();baseline=DateTime.Now;})); appActions.Controls.Add(Button("Open Task Manager",()=>Program.Open("taskmgr.exe")));
+        for (int column = 1; column <= 3; column++)
+            apps.Columns[column].DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleRight;
+        var selection = new TableLayoutPanel { Dock = DockStyle.Bottom, Height = 76, BackColor = panel, ColumnCount = 2, RowCount = 2 };
+        selection.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        selection.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        selectedApp = new Label { Dock = DockStyle.Fill, Padding = new Padding(12, 6, 0, 0), AutoEllipsis = true };
+        closeStatus = new Label { Dock = DockStyle.Fill, Padding = new Padding(12, 2, 0, 0), ForeColor = Color.LightSteelBlue, AutoEllipsis = true };
+        closeApp = Button("Close app", CloseSelected);
+        closeApp.BackColor = Color.FromArgb(37, 73, 78);
+        selection.Controls.Add(selectedApp, 0, 0);
+        selection.Controls.Add(closeStatus, 0, 1);
+        selection.Controls.Add(closeApp, 1, 0);
+        selection.SetRowSpan(closeApp, 2);
+        process.Controls.Add(selection);
+        var appActions = Actions(process, "Memory includes shared RAM. Change is measured from the baseline.");
+        appFilter = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 180, Margin = new Padding(5, 10, 5, 5), AccessibleName = "Process filter" };
+        appFilter.Items.AddRange(new object[] { "Open apps", "Background processes", "All processes" });
+        appFilter.SelectedIndex = 0;
+        appFilter.SelectedIndexChanged += (sender, args) => { RenderApps(); ShowSelection(); };
+        apps.SelectionChanged += (sender, args) => { if (!refreshingApps) ShowSelection(); };
+        appActions.Controls.Add(appFilter);
+        appActions.Controls.Add(Button("Reset baseline", () => { previous.Clear(); growth.Clear(); baseline = DateTime.Now; }));
+        appActions.Controls.Add(Button("Open Task Manager", () => Program.Open("taskmgr.exe")));
+        ShowSelection();
         startup=Grid(new[]{"Name","Status","Command"}); start.Controls.Add(startup);
         var startupActions=Actions(start,"Current-user Run entries only. Disabling prevents launch at next sign-in; it does not close the app. Other startup types remain in Windows Settings.");
         startupActions.Controls.Add(Button("Disable / restore selected",ToggleStartup)); startupActions.Controls.Add(Button("Reload",LoadStartup)); startupActions.Controls.Add(Button("All startup apps",()=>Program.Open("ms-settings:startupapps"))); LoadStartup();
@@ -314,7 +329,7 @@ class MainWindow : Form {
 
     Label Metric(TableLayoutPanel row,string title,int col) { var p=new Panel{Dock=DockStyle.Fill,BackColor=panel,Margin=new Padding(0,0,12,10)};p.Controls.Add(new Label{Text=title,AutoSize=true,ForeColor=Color.LightSteelBlue,Location=new Point(12,12)});var value=new Label{AutoSize=true,Font=new Font("Segoe UI",23,FontStyle.Bold),Location=new Point(10,40),ForeColor=accent};p.Controls.Add(value);row.Controls.Add(p,col,0);return value; }
     Button Button(string title,Action action) { var b=new Button{Text=title,AutoSize=true,Height=38,MinimumSize=new Size(150,38),BackColor=panel,ForeColor=ink,FlatStyle=FlatStyle.Flat,Margin=new Padding(5)}; b.FlatAppearance.BorderColor=Color.FromArgb(63,89,113);b.Click+=(s,e)=>{try{action();}catch(Exception ex){MessageBox.Show(this,ex.Message,"LaptopCare",MessageBoxButtons.OK,MessageBoxIcon.Warning);}};return b; }
-    FlowLayoutPanel Actions(TabPage p,string note) { var area=new FlowLayoutPanel{Dock=DockStyle.Top,Height=125,Padding=new Padding(5)};area.Controls.Add(new Label{Text=note,Width=900,Height=54,ForeColor=Color.LightSteelBlue});area.SetFlowBreak(area.Controls[0],true);p.Controls.Add(area);return area; }
+    FlowLayoutPanel Actions(TabPage p,string note) { var area=new FlowLayoutPanel{Dock=DockStyle.Top,Height=98,Padding=new Padding(8)};area.Controls.Add(new Label{Text=note,Width=810,Height=38,ForeColor=Color.LightSteelBlue});area.SetFlowBreak(area.Controls[0],true);p.Controls.Add(area);return area; }
     DataGridView Grid(string[] names) { var g=new DataGridView{Dock=DockStyle.Fill,ReadOnly=true,AllowUserToAddRows=false,AllowUserToDeleteRows=false,RowHeadersVisible=false,SelectionMode=DataGridViewSelectionMode.FullRowSelect,MultiSelect=false,AutoSizeColumnsMode=DataGridViewAutoSizeColumnsMode.Fill,BackgroundColor=panel,BorderStyle=BorderStyle.None,EnableHeadersVisualStyles=false}; g.DefaultCellStyle.BackColor=panel;g.DefaultCellStyle.ForeColor=ink;g.DefaultCellStyle.SelectionBackColor=Color.FromArgb(48,77,95);g.DefaultCellStyle.SelectionForeColor=Color.White;g.ColumnHeadersDefaultCellStyle.BackColor=bg;g.ColumnHeadersDefaultCellStyle.ForeColor=ink;g.RowTemplate.Height=32;foreach(string n in names)g.Columns.Add(n,n);return g; }
     void ShowDashboard(){Show();WindowState=FormWindowState.Normal;Activate();}
     async Task RefreshLive() {
@@ -325,23 +340,7 @@ class MainWindow : Form {
             graph.Values.Add(snap.Memory.Load);if(graph.Values.Count>120)graph.Values.RemoveAt(0);graph.Invalidate();
             if((DateTime.Now-baseline).TotalMinutes>=10){previous.Clear();growth.Clear();baseline=DateTime.Now;}
             foreach(var a in snap.Apps) { AppRow old; if(!previous.TryGetValue(a.Pid,out old)||old.Started!=a.Started)previous[a.Pid]=a;growth[a.Pid]=a.Bytes-previous[a.Pid].Bytes; }
-            if(Visible && apps.Visible) {
-                var selected = apps.SelectedRows.Count == 0 ? null : apps.SelectedRows[0].Tag as AppRow;
-                int firstVisible = apps.FirstDisplayedScrollingRowIndex;
-                apps.Rows.Clear();
-                DataGridViewRow matchingRow = null;
-                foreach (var app in snap.Apps.Take(80)) {
-                    int index = apps.Rows.Add(app.Name, app.Pid, (app.Bytes / 1048576.0).ToString("0.0"),
-                        (growth[app.Pid] / 1048576.0).ToString("+0.0;-0.0;0.0"), app.Title);
-                    var row = apps.Rows[index];
-                    row.Tag = app;
-                    if (selected != null && app.Pid == selected.Pid && app.Started == selected.Started)
-                        matchingRow = row;
-                }
-                apps.CurrentCell = matchingRow == null ? null : matchingRow.Cells[0];
-                if (firstVisible >= 0 && apps.Rows.Count > 0)
-                    apps.FirstDisplayedScrollingRowIndex = Math.Min(firstVisible, apps.Rows.Count - 1);
-            }
+            if (Visible && apps.Visible) RenderApps();
             var top=snap.Apps.FirstOrDefault(); var drive=new DriveInfo(Path.GetPathRoot(Environment.SystemDirectory));
             advice.Text=Monitor.Size(snap.Memory.Available)+" available of "+Monitor.Size(snap.Memory.Total)+" physical RAM.\r\n"+(pressure.Text=="NORMAL"?"Memory headroom looks comfortable.":"Memory is tight. Review large apps and close only work you have saved.")+"\r\n"+(top==null?"": "Largest process: "+top.Name+" ("+(top.Bytes/1048576.0).ToString("0")+" MB). ")+"System drive: "+Monitor.Size((ulong)drive.AvailableFreeSpace)+" free.";
             footer.Text="Updated "+snap.At.ToString("T")+" · every "+(timer.Interval/1000)+" seconds · local only · commit used "+Monitor.Size(snap.Memory.CommitLimit-snap.Memory.CommitAvailable)+" / "+Monitor.Size(snap.Memory.CommitLimit);
@@ -349,6 +348,40 @@ class MainWindow : Form {
             RefreshRepair();
         } catch(Exception e){footer.Text="Monitor: "+e.Message;} finally{sampling=false;}
     }
+    void RenderApps() {
+        if (latest == null) return;
+        var visibleApps = latest.Apps.Where(app => appFilter.SelectedIndex == 2 ||
+            (appFilter.SelectedIndex == 0) == !string.IsNullOrWhiteSpace(app.Title));
+        refreshingApps = true;
+        try {
+            var selected = apps.SelectedRows.Count == 0 ? null : apps.SelectedRows[0].Tag as AppRow;
+            int firstVisible = apps.FirstDisplayedScrollingRowIndex;
+            apps.Rows.Clear();
+            DataGridViewRow matchingRow = null;
+            foreach (var app in visibleApps.Take(80)) {
+                int index = apps.Rows.Add(app.Name, app.Pid, (app.Bytes / 1048576.0).ToString("0.0"),
+                    ((growth.ContainsKey(app.Pid) ? growth[app.Pid] : 0) / 1048576.0).ToString("+0.0;-0.0;0.0"), app.Title);
+                var row = apps.Rows[index];
+                row.Tag = app;
+                if (selected != null && app.Pid == selected.Pid && app.Started == selected.Started)
+                    matchingRow = row;
+            }
+            apps.CurrentCell = matchingRow == null ? null : matchingRow.Cells[0];
+            if (firstVisible >= 0 && apps.Rows.Count > 0)
+                apps.FirstDisplayedScrollingRowIndex = Math.Min(firstVisible, apps.Rows.Count - 1);
+        } finally { refreshingApps = false; }
+        ShowSelection(false);
+    }
+
+    void ShowSelection(bool resetStatus = true) {
+        var app = apps.SelectedRows.Count == 0 ? null : apps.SelectedRows[0].Tag as AppRow;
+        selectedApp.Text = app == null ? "No app selected" : app.Name + " · PID " + app.Pid;
+        closeApp.Enabled = app != null && !string.IsNullOrWhiteSpace(app.Title);
+        if (resetStatus || string.IsNullOrEmpty(closeStatus.Text))
+            closeStatus.Text = app == null ? "Select an app to see available actions." :
+                closeApp.Enabled ? "Close app sends a normal Windows close request." : "This process has no visible window.";
+    }
+
     async void CloseSelected() {
         var app = apps.SelectedRows.Count == 0 ? null : apps.SelectedRows[0].Tag as AppRow;
         if (app == null) {
@@ -381,7 +414,7 @@ class MainWindow : Form {
             closeStatus.Text = "Windows could not close " + app.Name + ". " + error.Message;
         }
     }
-    void LoadStartup(){startup.Rows.Clear();foreach(var r in Startup.Read()){int i=startup.Rows.Add(r.Name,r.Enabled ? "Enabled" : r.DisabledByWindows ? "Disabled in Windows" : "Disabled by LaptopCare",r.Command);startup.Rows[i].Tag=r;}}
+    void LoadStartup(){startup.Rows.Clear();foreach(var r in Startup.Read()){int i=startup.Rows.Add(r.Name,r.Enabled ? "Enabled" : r.DisabledByWindows ? "Disabled in Windows" : "Disabled by LaptopCare",r.Command);startup.Rows[i].Tag=r; startup.Rows[i].Cells[1].Style.ForeColor=r.Enabled ? accent : Color.FromArgb(255,185,88);}}
     void ToggleStartup(){if(startup.SelectedRows.Count==0)return;var row=startup.SelectedRows[0].Tag as StartupRow;if(row==null)return;if(row.DisabledByWindows){Program.Open("ms-settings:startupapps");return;}if(MessageBox.Show(this,(row.Enabled?"Disable ":"Restore ")+row.Name+" at next sign-in?", "Startup change",MessageBoxButtons.YesNo)!=DialogResult.Yes)return;Startup.Toggle(row);LoadStartup();}
     void StartRepair(string mode) {
         if(Repair.Busy() || Repair.WorkerActive()){MessageBox.Show(this,"An existing Windows scan or repair is running. No duplicate will be launched.");return;}
@@ -426,6 +459,7 @@ class MainWindow : Form {
             "\r\nStarted: " + result.Started + (string.IsNullOrEmpty(result.Finished) ? "" : "  ·  Finished: " + result.Finished);
         if (result != null && result.Status == "Running")
             status += "\r\n" + (progress == null ? "Waiting for Windows to report progress" : tool + " · " + progress + " complete");
+        repairStatus.ForeColor = result == null ? ink : result.Status.StartsWith("Completed") ? accent : Color.FromArgb(255,185,88);
         if (repairStatus.Text != status) repairStatus.Text = status;
         string tail = string.Join(Environment.NewLine, preview);
         if (repairText.Text != tail) {
