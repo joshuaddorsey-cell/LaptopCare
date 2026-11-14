@@ -217,22 +217,29 @@ class MainWindow : Form {
     public MainWindow() {
         Text="LaptopCare • Health & repair"; Size=new Size(1100,800); MinimumSize=new Size(880,680); StartPosition=FormStartPosition.CenterScreen;
         BackColor=bg; ForeColor=ink; Font=new Font("Segoe UI",10); Icon=Icon.ExtractAssociatedIcon(Application.ExecutablePath) ?? SystemIcons.Shield;
-        var header=new Panel { Dock=DockStyle.Top,Height=92,Padding=new Padding(24,16,24,10),BackColor=panel };
-        header.Controls.Add(new Label{Text="LAPTOPCARE",Font=new Font("Segoe UI",23,FontStyle.Bold),AutoSize=true,Location=new Point(24,10)});
-        header.Controls.Add(new Label{Text="Know what is slowing you down. Fix what needs attention.",AutoSize=true,Location=new Point(27,57),ForeColor=Color.LightSteelBlue});
+        var header=new Panel { Dock=DockStyle.Top,Height=58,Padding=new Padding(24,8,24,8),BackColor=panel };
+        header.Controls.Add(new Label{Text="LaptopCare",Font=new Font("Segoe UI",21,FontStyle.Bold),AutoSize=true,Location=new Point(24,10)});
         var tabs=new TabControl{Dock=DockStyle.Fill,Font=Font};
         var home=Page(tabs,"Overview"); var process=Page(tabs,"Memory & apps"); var start=Page(tabs,"Startup"); var repairs=Page(tabs,"Windows repair"); var tools=Page(tabs,"Tools & history");
         footer=new Label{Dock=DockStyle.Bottom,Height=30,Padding=new Padding(20,5,0,0),ForeColor=Color.LightSteelBlue,Text="Starting monitor…"};
         Controls.Add(tabs); Controls.Add(footer); Controls.Add(header);
         var layout=new TableLayoutPanel{Dock=DockStyle.Fill,Padding=new Padding(20),ColumnCount=1,RowCount=6};
-        layout.RowStyles.Add(new RowStyle(SizeType.Absolute,115)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,40)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,95)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,125)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,55)); layout.RowStyles.Add(new RowStyle(SizeType.Percent,100)); home.Controls.Add(layout);
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute,115)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,40)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,95)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,96)); layout.RowStyles.Add(new RowStyle(SizeType.Absolute,55)); layout.RowStyles.Add(new RowStyle(SizeType.Percent,100)); home.Controls.Add(layout);
         var metrics=new TableLayoutPanel{Dock=DockStyle.Fill,ColumnCount=3}; for(int i=0;i<3;i++)metrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,33.33f));
-        memory=Metric(metrics,"RAM IN USE",0); cpu=Metric(metrics,"CPU ACTIVITY",1); pressure=Metric(metrics,"MEMORY PRESSURE",2); layout.Controls.Add(metrics,0,0);
-        layout.Controls.Add(new Label{Text="Recent RAM samples · 5 seconds open / 15 seconds in tray",Dock=DockStyle.Fill,Padding=new Padding(0,12,0,0)},0,1);
+        memory=Metric(metrics,"Memory in use",0); cpu=Metric(metrics,"CPU activity",1); pressure=Metric(metrics,"Memory pressure",2); layout.Controls.Add(metrics,0,0);
+        layout.Controls.Add(new Label{Text="Recent memory use",Dock=DockStyle.Fill,Padding=new Padding(0,12,0,0)},0,1);
         graph=new Trend{Dock=DockStyle.Fill,BackColor=panel};layout.Controls.Add(graph,0,2);
         advice=new Label{Dock=DockStyle.Fill,Padding=new Padding(12),BackColor=panel,Font=new Font("Segoe UI",12),Text="Reading live Windows measurements…"}; layout.Controls.Add(advice,0,3);
         var quick=new FlowLayoutPanel{Dock=DockStyle.Fill}; quick.Controls.Add(Button("Find memory-heavy apps",()=>tabs.SelectedTab=process)); quick.Controls.Add(Button("Check Windows files",()=>tabs.SelectedTab=repairs)); layout.Controls.Add(quick,0,4);
-        layout.Controls.Add(new Label{Dock=DockStyle.Fill,Text="Monitoring is read-only. Repairs and startup changes happen only when you choose them.\r\nMinimize to keep monitoring in the tray. No forced RAM clearing or automatic app termination.",ForeColor=Color.LightSteelBlue,Padding=new Padding(2,8,0,0)},0,5);
+        var device = new Label {
+            Dock = DockStyle.Fill, Padding = new Padding(12), BackColor = panel,
+            ForeColor = Color.LightSteelBlue, Text = "Reading laptop details…"
+        };
+        layout.Controls.Add(device, 0, 5);
+        Shown += async (sender, args) => {
+            string details = await Task.Run((Func<string>)DeviceDetails);
+            if (!device.IsDisposed) device.Text = details;
+        };
         apps=Grid(new[]{"App","PID","RAM (MB)","Change (MB)","Window"}); process.Controls.Add(apps);
         var appActions=Actions(process,"RAM is resident working set, not private memory. Shared pages can appear in multiple apps. Change is since the baseline (up to 10 minutes).");
         appActions.Controls.Add(Button("Ask selected app to close",CloseSelected)); appActions.Controls.Add(Button("Reset baseline",()=>{previous.Clear();growth.Clear();baseline=DateTime.Now;})); appActions.Controls.Add(Button("Open Task Manager",()=>Program.Open("taskmgr.exe")));
@@ -262,6 +269,34 @@ class MainWindow : Form {
         timer=new System.Windows.Forms.Timer{Interval=5000};timer.Tick+=async(s,e)=>await RefreshLive(); timer.Start(); Shown+=async(s,e)=>await RefreshLive();
     }
     TabPage Page(TabControl tabs,string name) { var p=new TabPage(name){BackColor=bg,ForeColor=ink,Padding=new Padding(10)};tabs.TabPages.Add(p);return p; }
+    static string DeviceDetails() {
+        var details = new List<string>();
+        foreach (var query in new[] {
+            "SELECT Manufacturer, Model FROM Win32_ComputerSystem",
+            "SELECT Name FROM Win32_Processor",
+            "SELECT Caption, BuildNumber FROM Win32_OperatingSystem"
+        }) {
+            try {
+                using (var search = new ManagementObjectSearcher(query))
+                using (var results = search.Get()) {
+                    foreach (ManagementObject item in results) {
+                        using (item) {
+                            var values = item.Properties.Cast<PropertyData>()
+                                .Where(property => property.Value != null)
+                                .ToDictionary(property => property.Name, property => property.Value.ToString().Trim());
+                            if (values.ContainsKey("Model")) details.Add(values["Manufacturer"] + " " + values["Model"]);
+                            else if (values.ContainsKey("Name")) details.Add(values["Name"]);
+                            else if (values.ContainsKey("Caption")) details.Add(values["Caption"] + " · Build " + values["BuildNumber"]);
+                        }
+                    }
+                }
+            } catch (ManagementException) {
+            } catch (System.Runtime.InteropServices.COMException) {
+            } catch (UnauthorizedAccessException) {}
+        }
+        return details.Count == 0 ? "Laptop details unavailable" : string.Join(Environment.NewLine, details);
+    }
+
     Label Metric(TableLayoutPanel row,string title,int col) { var p=new Panel{Dock=DockStyle.Fill,BackColor=panel,Margin=new Padding(0,0,12,10)};p.Controls.Add(new Label{Text=title,AutoSize=true,ForeColor=Color.LightSteelBlue,Location=new Point(12,12)});var value=new Label{AutoSize=true,Font=new Font("Segoe UI",23,FontStyle.Bold),Location=new Point(10,40),ForeColor=accent};p.Controls.Add(value);row.Controls.Add(p,col,0);return value; }
     Button Button(string title,Action action) { var b=new Button{Text=title,AutoSize=true,Height=38,MinimumSize=new Size(150,38),BackColor=panel,ForeColor=ink,FlatStyle=FlatStyle.Flat,Margin=new Padding(5)}; b.FlatAppearance.BorderColor=Color.FromArgb(63,89,113);b.Click+=(s,e)=>{try{action();}catch(Exception ex){MessageBox.Show(this,ex.Message,"LaptopCare",MessageBoxButtons.OK,MessageBoxIcon.Warning);}};return b; }
     FlowLayoutPanel Actions(TabPage p,string note) { var area=new FlowLayoutPanel{Dock=DockStyle.Top,Height=125,Padding=new Padding(5)};area.Controls.Add(new Label{Text=note,Width=900,Height=54,ForeColor=Color.LightSteelBlue});area.SetFlowBreak(area.Controls[0],true);p.Controls.Add(area);return area; }
